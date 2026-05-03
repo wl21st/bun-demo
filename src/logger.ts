@@ -24,7 +24,8 @@ const consola = createConsola({
                 const msg = logObj.args
                     .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
                     .join(" ");
-                process.stdout.write(`${DIM}${ts}${RESET} ${color}${level.padEnd(5)}${RESET} ${tag} - ${msg}\n`);
+                const stream = (level === "ERROR" || level === "FATAL") ? process.stderr : process.stdout;
+                stream.write(`${DIM}${ts}${RESET} ${color}${level.padEnd(5)}${RESET} ${tag} - ${msg}\n`);
             },
         },
     ],
@@ -36,7 +37,8 @@ export function createLogger(tag: string) {
 
 export function abbrev(str: string, limit = 1024): string {
     if (str.length <= limit) return str;
-    return `${str.slice(0, 512)}...[${str.length} chars]...${str.slice(-512)}`;
+    const half = Math.floor(limit / 2);
+    return `${str.slice(0, half)}...[${str.length} chars]...${str.slice(-half)}`;
 }
 
 export function filterHeaders(headers: Record<string, string>): Record<string, string> {

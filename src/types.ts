@@ -49,7 +49,7 @@ export type Observation = {
 
 export type TransportLogEntry = {
     model: string;
-    stopReason: string | undefined;
+    stopReason: "stop" | "length" | "tool_calls" | "content_filter" | undefined;
     latencyMs: number;
     usage: {
         promptTokens: number | undefined;
@@ -60,7 +60,7 @@ export type TransportLogEntry = {
         tools: string[];
     };
     response: {
-        toolCalled: string;
+        toolCalled: AgentStep["tool"];
         arguments: Record<string, unknown>;
     };
 };

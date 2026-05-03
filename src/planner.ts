@@ -104,13 +104,13 @@ const AGENT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     },
 ];
 
-let logsEnsured = false;
+let logsDirPromise: Promise<void> | null = null;
 
 async function ensureLogsDir(): Promise<void> {
-    if (!logsEnsured) {
-        await mkdir("logs", { recursive: true });
-        logsEnsured = true;
+    if (!logsDirPromise) {
+        logsDirPromise = mkdir("logs", { recursive: true });
     }
+    await logsDirPromise;
 }
 
 export async function planNextStep(params: {
@@ -152,8 +152,21 @@ export async function planNextStep(params: {
     }
 
     const toolCall = toolCalls[0]!;
+
+    const knownTools = new Set(AGENT_TOOLS.map((t) => t.function.name));
+    if (!knownTools.has(toolCall.function.name)) {
+        throw new Error(`LLM returned unknown tool: "${toolCall.function.name}"`);
+    }
     const toolName = toolCall.function.name as AgentStep["tool"];
-    const toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+
+    let toolArgs: Record<string, unknown>;
+    try {
+        toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+    } catch (cause) {
+        throw new Error(
+            `Failed to parse tool arguments for "${toolName}": ${String(cause)}\nRaw: ${toolCall.function.arguments}`
+        );
+    }
 
     // Build terminal transport log entry with abbreviated strings
     const entry: TransportLogEntry = {
@@ -184,21 +197,23 @@ export async function planNextStep(params: {
     plannerLog.debug(entry);
 
     // Write raw NDJSON wire log entry (no truncation)
-    const reqHeaders = filterHeaders(
-        Object.fromEntries(rawResponse.headers.entries())
-    );
-    // Response headers come from the underlying fetch Response
+    // Note: rawResponse only exposes server-side response headers; outgoing request headers
+    // are not accessible from the SDK's withResponse() result.
     const respHeaders = filterHeaders(
         Object.fromEntries(rawResponse.headers.entries())
     );
     const wireEntry = {
         timestamp: new Date().toISOString(),
         type: "chat.completions",
-        request: { headers: reqHeaders, body: createParams },
+        request: { headers: {} as Record<string, string>, body: createParams },
         response: { headers: respHeaders, body: response },
     };
-    await ensureLogsDir();
-    await appendFile("logs/agent-wire.log", JSON.stringify(wireEntry) + "\n");
+    try {
+        await ensureLogsDir();
+        await appendFile("logs/agent-wire.log", JSON.stringify(wireEntry) + "\n");
+    } catch (cause) {
+        plannerLog.warn(`Wire log write failed (continuing): ${String(cause)}`);
+    }
 
     return { tool: toolName, input: toolArgs } as AgentStep;
 }
