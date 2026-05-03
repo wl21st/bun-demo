@@ -1,0 +1,12 @@
+{
+  "name": "bun-ai-agent",
+  "type": "module",
+  "scripts": {
+    "agent": "bun run src/agent.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "consola": "^3.4.2",
+    "openai": "latest"
+  }
+}
