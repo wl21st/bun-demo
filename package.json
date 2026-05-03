@@ -3,10 +3,18 @@
   "type": "module",
   "scripts": {
     "agent": "bun run src/agent.ts",
+    "tui": "bun run src/tui.tsx",
     "test": "bun test"
   },
   "dependencies": {
     "consola": "^3.4.2",
-    "openai": "latest"
+    "ink": "^7.0.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "openai": "latest",
+    "react": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14"
   }
 }
