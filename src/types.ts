@@ -46,3 +46,21 @@ export type Observation = {
     ok: boolean;
     output: string;
 };
+
+export type TransportLogEntry = {
+    model: string;
+    stopReason: string | undefined;
+    latencyMs: number;
+    usage: {
+        promptTokens: number | undefined;
+        completionTokens: number | undefined;
+    };
+    request: {
+        messages: Array<{ role: string; content: string }>;
+        tools: string[];
+    };
+    response: {
+        toolCalled: string;
+        arguments: Record<string, unknown>;
+    };
+};

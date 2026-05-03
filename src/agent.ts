@@ -1,4 +1,6 @@
-import { consola } from "consola";
+import { createLogger } from "./logger";
+
+const consola = createLogger("agent");
 import { executeStep } from "./executor";
 import { planNextStep } from "./planner";
 import type { AgentStep, Observation } from "./types";
