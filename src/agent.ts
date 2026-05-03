@@ -32,7 +32,7 @@ for (let i = 0; i < MAX_STEPS; i++) {
         history,
     });
 
-    consola.info("Tool:", step.tool);
+    consola.info("Tool:", step.tool, step.input);
 
     const observation = await executeStep(step);
 
@@ -42,7 +42,7 @@ for (let i = 0; i < MAX_STEPS; i++) {
     });
 
     consola.log("OK:", observation.ok);
-    consola.log("Output:");
+    consola.log(`Output (${step.tool}):`);
     consola.log(observation.output.slice(0, 2000));
     consola.log("----");
 
