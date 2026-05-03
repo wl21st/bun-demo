@@ -1,5 +1,9 @@
 import OpenAI from "openai";
-import type { AgentStep, Config, Observation } from "./types";
+import { mkdir, appendFile } from "node:fs/promises";
+import type { AgentStep, Config, Observation, TransportLogEntry } from "./types";
+import { createLogger, abbrev, filterHeaders } from "./logger";
+
+const plannerLog = createLogger("planner");
 
 const instructions = `
 You are a local code AI Agent.
@@ -9,57 +13,105 @@ Your goals:
 - You can read files, write files, list files, execute shell commands, and run tests
 - Choose only one tool per turn
 - If tests fail, continue fixing based on the errors
-- Do not explain your process — return JSON only
-
-You may only return one of the following JSON objects:
-
-1. List files:
-{
-  "tool": "listFiles",
-  "input": { "dir": "." }
-}
-
-2. Read file:
-{
-  "tool": "readFile",
-  "input": { "path": "demo/math.ts" }
-}
-
-3. Write file:
-{
-  "tool": "writeFile",
-  "input": {
-    "path": "demo/math.test.ts",
-    "content": "file content"
-  }
-}
-
-4. Execute shell:
-{
-  "tool": "shell",
-  "input": { "command": "ls" }
-}
-
-5. Run tests:
-{
-  "tool": "test",
-  "input": {}
-}
-
-6. Finish:
-{
-  "tool": "finish",
-  "input": { "message": "completion message" }
-}
-
-Hard rules:
-- Output JSON only
-- No Markdown
-- No explanatory text
 - Do not delete user files
 - Do not run dangerous commands
-- Prefer operating inside the demo/ directory
+- Prefer operating inside the project directory
 `;
+
+const AGENT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+    {
+        type: "function",
+        function: {
+            name: "listFiles",
+            description: "List files in a directory",
+            parameters: {
+                type: "object",
+                properties: {
+                    dir: { type: "string", description: "Directory path to list" },
+                },
+                required: ["dir"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "readFile",
+            description: "Read a file's contents",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: "File path to read" },
+                },
+                required: ["path"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "writeFile",
+            description: "Write content to a file",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: "File path to write" },
+                    content: { type: "string", description: "Content to write" },
+                },
+                required: ["path", "content"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "shell",
+            description: "Execute a shell command",
+            parameters: {
+                type: "object",
+                properties: {
+                    command: { type: "string", description: "Shell command to execute" },
+                },
+                required: ["command"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "test",
+            description: "Run the project's test suite",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: [],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "finish",
+            description: "Signal that the task is complete",
+            parameters: {
+                type: "object",
+                properties: {
+                    message: { type: "string", description: "Completion message" },
+                },
+                required: ["message"],
+            },
+        },
+    },
+];
+
+let logsDirPromise: Promise<void> | null = null;
+
+async function ensureLogsDir(): Promise<void> {
+    if (!logsDirPromise) {
+        logsDirPromise = mkdir("logs", { recursive: true });
+    }
+    await logsDirPromise;
+}
 
 export async function planNextStep(params: {
     config: Config;
@@ -70,38 +122,98 @@ export async function planNextStep(params: {
     }>;
 }): Promise<AgentStep> {
     const client = new OpenAI({ apiKey: params.config.apiKey, baseURL: params.config.baseURL });
-    const userInput = `
-User task:
-${params.task}
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        {
+            role: "system",
+            content: instructions,
+        },
+        {
+            role: "user",
+            content: `User task:\n${params.task}\n\nHistory and observations:\n${JSON.stringify(params.history, null, 2)}`,
+        },
+    ];
 
-History and observations:
-${JSON.stringify(params.history, null, 2)}
-`;
-
-    const response = await client.chat.completions.create({
+    const createParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
         model: params.config.model,
-        messages: [
-            {
-                role: "system",
-                content: instructions,
-            },
-            {
-                role: "user",
-                content: userInput,
-            },
-        ],
-    });
+        messages,
+        tools: AGENT_TOOLS,
+        tool_choice: "required",
+    };
 
-    const text = response.choices[0]?.message?.content?.trim() ?? "";
+    const t0 = Date.now();
+    const { data: response, response: rawResponse } = await client.chat.completions
+        .create(createParams)
+        .withResponse();
+    const latencyMs = Date.now() - t0;
 
-    try {
-        return JSON.parse(stripCodeFence(text));
-    } catch {
-        throw new Error(`Model did not return valid JSON:\n${text}`);
+    const toolCalls = response.choices[0]?.message?.tool_calls;
+    if (!toolCalls || toolCalls.length === 0) {
+        throw new Error(`LLM returned no tool call: ${JSON.stringify(response)}`);
     }
-}
 
-function stripCodeFence(text: string): string {
-    const match = text.match(/```[\w]*\n?([\s\S]*?)\n?```/i);
-    return match ? match[1]!.trim() : text.trim();
+    const toolCall = toolCalls[0]!;
+
+    const knownTools = new Set(AGENT_TOOLS.map((t) => t.function.name));
+    if (!knownTools.has(toolCall.function.name)) {
+        throw new Error(`LLM returned unknown tool: "${toolCall.function.name}"`);
+    }
+    const toolName = toolCall.function.name as AgentStep["tool"];
+
+    let toolArgs: Record<string, unknown>;
+    try {
+        toolArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+    } catch (cause) {
+        throw new Error(
+            `Failed to parse tool arguments for "${toolName}": ${String(cause)}\nRaw: ${toolCall.function.arguments}`
+        );
+    }
+
+    // Build terminal transport log entry with abbreviated strings
+    const entry: TransportLogEntry = {
+        model: response.model,
+        stopReason: response.choices[0]?.finish_reason ?? undefined,
+        latencyMs,
+        usage: {
+            promptTokens: response.usage?.prompt_tokens,
+            completionTokens: response.usage?.completion_tokens,
+        },
+        request: {
+            messages: messages.map((m) => ({
+                role: m.role,
+                content: abbrev(typeof m.content === "string" ? m.content : JSON.stringify(m.content)),
+            })),
+            tools: AGENT_TOOLS.map((t) => t.function.name),
+        },
+        response: {
+            toolCalled: toolName,
+            arguments: Object.fromEntries(
+                Object.entries(toolArgs).map(([k, v]) => [
+                    k,
+                    typeof v === "string" ? abbrev(v) : v,
+                ])
+            ),
+        },
+    };
+    plannerLog.debug(entry);
+
+    // Write raw NDJSON wire log entry (no truncation)
+    // Note: rawResponse only exposes server-side response headers; outgoing request headers
+    // are not accessible from the SDK's withResponse() result.
+    const respHeaders = filterHeaders(
+        Object.fromEntries(rawResponse.headers.entries())
+    );
+    const wireEntry = {
+        timestamp: new Date().toISOString(),
+        type: "chat.completions",
+        request: { headers: {} as Record<string, string>, body: createParams },
+        response: { headers: respHeaders, body: response },
+    };
+    try {
+        await ensureLogsDir();
+        await appendFile("logs/agent-wire.log", JSON.stringify(wireEntry) + "\n");
+    } catch (cause) {
+        plannerLog.warn(`Wire log write failed (continuing): ${String(cause)}`);
+    }
+
+    return { tool: toolName, input: toolArgs } as AgentStep;
 }
