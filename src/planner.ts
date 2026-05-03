@@ -101,10 +101,7 @@ ${JSON.stringify(params.history, null, 2)}
     }
 }
 
-function stripCodeFence(text: string) {
-    return text
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/```$/i, "")
-        .trim();
+function stripCodeFence(text: string): string {
+    const match = text.match(/```[\w]*\n?([\s\S]*?)\n?```/i);
+    return match ? match[1]!.trim() : text.trim();
 }
